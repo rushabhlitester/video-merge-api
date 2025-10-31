@@ -55,8 +55,9 @@ app.post('/api/merge-videos', upload.fields([
     // Build the complex filter chain
     // Video: normalize fps, pixel format, reset timestamps
     const videoFilters = [
-      '[0:v]fps=30,format=yuv420p,scale=w=1920:h=1080:force_original_aspect_ratio=decrease,setpts=PTS-STARTPTS[v0]',
-      '[1:v]fps=30,format=yuv420p,scale=w=1920:h=1080:force_original_aspect_ratio=decrease,setpts=PTS-STARTPTS[v1]'
+      // Scale to fit inside 1080x1920 (portrait), then pad to exactly 1080x1920, set SAR to 1
+      '[0:v]fps=30,format=yuv420p,scale=w=1080:h=1920:force_original_aspect_ratio=decrease,pad=1080:1920:(1080-iw)/2:(1920-ih)/2,setsar=1,setpts=PTS-STARTPTS[v0]',
+      '[1:v]fps=30,format=yuv420p,scale=w=1080:h=1920:force_original_aspect_ratio=decrease,pad=1080:1920:(1080-iw)/2:(1920-ih)/2,setsar=1,setpts=PTS-STARTPTS[v1]'
     ];
 
     // Only support two cases:
