@@ -45,9 +45,9 @@ app.post('/api/merge-videos', upload.fields([
 
     const [introInfo, mainInfo] = await Promise.all([probeIntro, probeMain]);
 
-    // Check for audio streams
-    const introHasA = (introInfo?.streams || []).some(s => s.codec_type === 'audio');
-    const mainHasA = (mainInfo?.streams || []).some(s => s.codec_type === 'audio');
+  // Check for audio streams
+  const introHasA = (introInfo?.streams || []).some(s => s.codec_type === 'audio');
+  const mainHasA = (mainInfo?.streams || []).some(s => s.codec_type === 'audio');
 
     log('intro audio:', introHasA ? 'yes' : 'no');
     log('main audio:', mainHasA ? 'yes' : 'no');
@@ -59,37 +59,36 @@ app.post('/api/merge-videos', upload.fields([
       '[1:v]fps=30,format=yuv420p,scale=w=1920:h=1080:force_original_aspect_ratio=decrease,setpts=PTS-STARTPTS[v1]'
     ];
 
-    // Audio handling rewritten:
-    // We always concat video only. Audio is processed separately.
-    // Cases:
-    // 1. Both audio: resample both, concat audio with its own concat filter -> output [a]
-    // 2. Only intro audio: resample intro -> output [a_intro]
-    // 3. Only main audio: resample main -> output [a_main]
-    // 4. Neither: no audio filters/output
-    const audioFilters = [];
-    let audioOutputLabel = null; // label to map in outputOptions
-    const filterSegments = [...videoFilters];
+    // Only support two cases:
+    // Case 1: both have audio (concat audio)
+    // Case 3: only main has audio (use main audio)
+    // Reject intro-only or neither-audio cases early.
+    if (introHasA && !mainHasA) {
+      return res.status(400).json({ error: 'Unsupported combination: intro has audio but main does not. Provide main clip with audio or remove intro audio.' });
+    }
+    if (!introHasA && !mainHasA) {
+      return res.status(400).json({ error: 'Unsupported combination: neither input has audio. Provide a main clip with audio.' });
+    }
 
-    // Concat video only (always) -> produces [v]
+    const filterSegments = [...videoFilters];
+    const audioFilters = [];
+    let audioOutputLabel = null;
+
+    // Video concat always
     filterSegments.push('[v0][v1]concat=n=2:v=1:a=0[v]');
 
     if (introHasA && mainHasA) {
-      audioFilters.push('[0:a]aresample=48000,asetpts=PTS-STARTPTS[a_intro]');
-      audioFilters.push('[1:a]aresample=48000,asetpts=PTS-STARTPTS[a_main]');
-      // Concat audio separately
-      audioFilters.push('[a_intro][a_main]concat=n=2:v=0:a=1[a]');
+      // Normalize and concat audio
+      audioFilters.push('[0:a]aresample=48000,asetpts=PTS-STARTPTS[a0]');
+      audioFilters.push('[1:a]aresample=48000,asetpts=PTS-STARTPTS[a1]');
+      audioFilters.push('[a0][a1]concat=n=2:v=0:a=1[a]');
       audioOutputLabel = '[a]';
-      log('audio strategy: both inputs have audio - concatenating audio streams');
-    } else if (introHasA && !mainHasA) {
-      audioFilters.push('[0:a]aresample=48000,asetpts=PTS-STARTPTS[a_intro]');
-      audioOutputLabel = '[a_intro]';
-      log('audio strategy: only intro has audio - using intro audio');
-    } else if (!introHasA && mainHasA) {
+      log('audio strategy: both have audio - concatenating');
+    } else {
+      // Only main has audio
       audioFilters.push('[1:a]aresample=48000,asetpts=PTS-STARTPTS[a_main]');
       audioOutputLabel = '[a_main]';
       log('audio strategy: only main has audio - using main audio');
-    } else {
-      log('audio strategy: no audio - video only output');
     }
 
     const allFilters = [...filterSegments, ...audioFilters];
@@ -102,6 +101,11 @@ app.post('/api/merge-videos', upload.fields([
         .input(introPath)
         .input(mainPath)
         .complexFilter(allFilters);
+
+      // forward stderr for debugging
+      cmd.on('stderr', line => {
+        if (line) log('ffmpeg:', line);
+      });
 
       // Map outputs based on audio presence
       if (audioOutputLabel) {
