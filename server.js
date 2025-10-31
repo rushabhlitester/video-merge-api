@@ -55,44 +55,55 @@ app.post('/api/merge-videos', upload.fields([
     // Build the complex filter chain
     // Video: normalize fps, pixel format, reset timestamps
     const videoFilters = [
-      '[0:v]fps=30,format=yuv420p,setpts=PTS-STARTPTS[v0]',
-      '[1:v]fps=30,format=yuv420p,setpts=PTS-STARTPTS[v1]'
+      '[0:v]fps=30,format=yuv420p,scale=w=1920:h=1080:force_original_aspect_ratio=decrease,setpts=PTS-STARTPTS[v0]',
+      '[1:v]fps=30,format=yuv420p,scale=w=1920:h=1080:force_original_aspect_ratio=decrease,setpts=PTS-STARTPTS[v1]'
     ];
 
-    // Audio: resample to 48kHz, reset timestamps, or generate silence
+    // Audio: handle based on presence in inputs
     const audioFilters = [];
-    let concatAudioPads = '';
+    let concatFilter;
+    let hasAudioOutput = false;
 
-    if (introHasA) {
+    if (introHasA && mainHasA) {
+      // Both have audio: resample both and concat
       audioFilters.push('[0:a]aresample=48000,asetpts=PTS-STARTPTS[a0]');
-      concatAudioPads += '[a0]';
-    } else {
-      audioFilters.push('anullsrc=cl=stereo:r=48000,atrim=0:1[a0]');
-      concatAudioPads += '[a0]';
-    }
-
-    if (mainHasA) {
       audioFilters.push('[1:a]aresample=48000,asetpts=PTS-STARTPTS[a1]');
-      concatAudioPads += '[a1]';
+      concatFilter = '[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]';
+      hasAudioOutput = true;
+      log('audio strategy: both inputs have audio - concatenating');
+    } else if (introHasA && !mainHasA) {
+      // Only intro has audio: use intro audio for the whole output
+      audioFilters.push('[0:a]aresample=48000,asetpts=PTS-STARTPTS[a0]');
+      concatFilter = '[v0][a0][v1][a0]concat=n=2:v=1:a=1[v][a]';
+      hasAudioOutput = true;
+      log('audio strategy: only intro has audio - extending through concat');
+    } else if (!introHasA && mainHasA) {
+      // Only main has audio: concat video only, then overlay audio from main
+      concatFilter = '[v0][v1]concat=n=2:v=1:a=0[v]';
+      audioFilters.push('[1:a]aresample=48000,asetpts=PTS-STARTPTS[a1]');
+      hasAudioOutput = true;
+      log('audio strategy: only main has audio - using main audio track');
     } else {
-      audioFilters.push('anullsrc=cl=stereo:r=48000,atrim=0:1[a1]');
-      concatAudioPads += '[a1]';
+      // Neither has audio: concat video only
+      concatFilter = '[v0][v1]concat=n=2:v=1:a=0[v]';
+      hasAudioOutput = false;
+      log('audio strategy: no audio in either input');
     }
-
-    // Concat filter: n=2 segments, v=1 video output, a=1 audio output
-    const concatFilter = `[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]`;
 
     const allFilters = [...videoFilters, ...audioFilters, concatFilter];
 
-    log('merge filters:', allFilters.length, 'rules');
+    log('merge filters:', allFilters.length, 'rules applied');
 
     // Execute the merge with robust error handling
     await new Promise((resolve, reject) => {
-      ffmpeg()
+      const cmd = ffmpeg()
         .input(introPath)
         .input(mainPath)
-        .complexFilter(allFilters)
-        .outputOptions([
+        .complexFilter(allFilters);
+
+      // Map outputs based on audio presence
+      if (hasAudioOutput) {
+        cmd.outputOptions([
           '-map [v]',
           '-map [a]',
           '-c:v libx264',
@@ -101,7 +112,18 @@ app.post('/api/merge-videos', upload.fields([
           '-c:a aac',
           '-b:a 192k',
           '-movflags +faststart'
-        ])
+        ]);
+      } else {
+        cmd.outputOptions([
+          '-map [v]',
+          '-c:v libx264',
+          '-preset veryfast',
+          '-crf 20',
+          '-movflags +faststart'
+        ]);
+      }
+
+      cmd
         .on('end', () => {
           log('merge complete');
           resolve();
